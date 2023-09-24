@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+#
+import os, sys, subprocess, time
+from urllib.request import urlretrieve
+from tempfile import gettempdir
+
+docker_image = 'rocwind/dev-env'
+shell = '/bin/bash'
+download_url = 'https://raw.githubusercontent.com/rocwind/dev-env/master/docker-run'
+
+def show_help():
+    print("""Launch dev environment Docker container and execute given command line inside the container.
+
+docker-run [options] [command line]
+  --image: Docker image to use, default image is '{}'
+  --pull: Always pull latest image before execute any Docker command
+  --shell: Shell used for executing command line inside container, default to '{}'
+  --no-args-path-mapping: Skip auto map command line args path into path inside container.
+                          By default paths that under host user $HOME will be mapped automatically.
+  --upgrade: Upgrade image and this script self
+  --help: Show this help information
+
+If [command line] was specified, execute the [command line] inside container and exit;
+Otherwise launch the container with interative shell.""".format(docker_image, shell))
+    return 0
+
+
+# map host ~ => to container /home/$USER
+host_user = os.environ.get('USER', 'user')
+container_user_home = '/home/{}'.format(host_user)
+host_user_home = os.path.expanduser('~')
+
+
+def is_host_path_inside_user_home(path):
+    return os.path.normpath(os.path.expanduser(path)).startswith(host_user_home)
+
+
+def map_host_path_to_container_path(path):
+    return os.path.join(container_user_home, os.path.relpath(os.path.normpath(os.path.expanduser(path)), host_user_home))
+
+
+# read host go env
+go_env = {}
+try:
+    go_env_outputs = subprocess.run(['go', 'env'], stdout=subprocess.PIPE).stdout.decode('utf-8')
+    for item in go_env_outputs.split('\n'):
+        (env, value) = item.split('=')
+        value = value.strip('"')
+        if value:
+            go_env[env] = value
+except:
+    pass
+
+# npm cache - map into container
+host_npm_cache = os.path.expanduser('~/.npm')
+try:
+    npm_config_outputs = subprocess.run(['npm', 'config', 'get', 'cache'], stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
+    if npm_config_outputs:
+        host_npm_cache = npm_config_outputs
+except:
+    pass
+
+# define host env that need map to container
+map_env_vars = [
+    # golang
+    'GOPATH', 'GOMODCACHE', 'GOCACHE', 'GOTMPDIR',
+]
+
+env_var_defaults = {
+}
+
+
+def map_host_environment_variables():
+    env_mappings = []
+    for env in map_env_vars:
+        # go_env -> os_env -> env_defaults
+        value = go_env.get(env, os.environ.get(env, env_var_defaults.get(env, '')))
+        if not value:
+            continue
+        if is_host_path_inside_user_home(value):
+            value = map_host_path_to_container_path(value)
+        elif os.path.exists(value):  # ignore paths that doesn't support mapping
+            continue
+        env_mappings.append((env, value))
+
+    return ' '.join(map(lambda pair: '--env {}={}'.format(pair[0], pair[1]), env_mappings))
+
+
+# update this script self
+def self_upgrade():
+    print('pull docker image ...')
+    os.system('docker pull {}'.format(docker_image))
+
+    print('check script upgrade ...')
+    this_script_path = os.path.realpath(__file__)
+
+    # download
+    print('downloading ...')
+    download_file = os.path.join(gettempdir(), 'docker-run.download')
+    urlretrieve(download_url, download_file)
+    print('download completed.')
+
+    os.system('chmod +x "{}"'.format(download_file))
+    os.system('rm -f {} && mv {} {}'.format(this_script_path, download_file, this_script_path))
+    print('upgrade success, will be available in next run.')
+    return 0
+
+# auto check update every 1 day
+def need_auto_check_update():
+    this_script_path = os.path.realpath(__file__)
+    last_check_time = os.path.getmtime(this_script_path)
+    current_time = time.time()
+    return current_time - last_check_time > 86400
+
+if __name__ == '__main__':
+    # simple arg parse
+    command = []
+    pull = False
+    # flags
+    command_begin = False
+    next_arg_is_image = False
+    next_arg_is_shell = False
+    no_args_path_mapping = False
+    for arg in sys.argv[1:]:
+        if next_arg_is_image:
+            docker_image = arg
+            next_arg_is_image = False
+            continue
+        if next_arg_is_shell:
+            shell = arg
+            next_arg_is_shell = False
+            continue
+        if not command_begin and arg == "--pull":
+            pull = True
+            continue
+        if not command_begin and arg == "--image":
+            next_arg_is_image = True
+            continue
+        if not command_begin and arg == "--shell":
+            next_arg_is_shell = True
+            continue
+        if not command_begin and arg == "--no-args-path-mapping":
+            no_args_path_mapping = True
+            continue
+        if not command_begin and arg == "--help":
+            exit(show_help())
+            continue
+        if not command_begin and arg == "--upgrade":
+            exit(self_upgrade())
+            continue
+
+        command.append(arg)
+        command_begin = True
+
+    # upgrade this tool together with docker image
+    if need_auto_check_update():
+        self_upgrade()
+        pull = False
+
+    # pull docker image if needed
+    if pull:
+        os.system('docker pull {}'.format(docker_image))
+
+    # set current dir for container
+    host_current_dir = os.getcwd()
+    container_current_dir = map_host_path_to_container_path(host_current_dir)
+
+    # map env vars
+    env_mappings = map_host_environment_variables()
+
+    # check if input is tty
+    tty_flag = ''
+    bash_flag = ''
+    if sys.stdin.isatty():
+        tty_flag = '-t'
+        bash_flag = '-i'
+
+    # common flags with path mount and env mappings
+    flags = '--rm -i {} -w {} -v {}:{} -v {}:/root/.npm {} {}'.format(
+        tty_flag,
+        container_current_dir,
+        host_user_home,
+        container_user_home,
+        host_npm_cache,
+        env_mappings,
+        docker_image,
+    )
+
+    # run script
+    whole_cmd = ''
+    if len(command) > 0:
+        # run in one-time command mode
+        # map paths if necessary
+        command = map(lambda p: map_host_path_to_container_path(p) if not no_args_path_mapping and is_host_path_inside_user_home(p) else p, command)
+        scripts = ' '.join(command)
+        whole_cmd = "docker run {} {} {} -c '{}'".format(
+            flags,
+            shell,
+            bash_flag,
+            scripts.replace("'", "'\"'\"'"),
+        )
+    else:
+        # run in interactive mode
+        whole_cmd = 'docker run {} {}'.format(
+            flags,
+            shell,
+        )
+    # execute the cmd
+    print(whole_cmd)
+    result = subprocess.run(whole_cmd, shell=True)
+    exit(result.returncode)
