@@ -4,7 +4,7 @@ import os, sys, subprocess, time
 from urllib.request import urlretrieve
 from tempfile import gettempdir
 
-docker_image = 'rocwind/dev-env'
+docker_image = 'docker.io/rocwind/dev-env'
 shell = '/bin/bash'
 download_url = 'https://raw.githubusercontent.com/rocwind/dev-env/master/docker-run'
 

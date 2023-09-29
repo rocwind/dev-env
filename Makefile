@@ -1,4 +1,4 @@
 .PHONY : build
 
 build:
-	docker build . -t rocwind/dev-env
+	docker build . -t docker.io/rocwind/dev-env
