@@ -202,7 +202,7 @@ if __name__ == '__main__':
     # - modifies the user and group id
     # - launch shell as the container_user
     bootstrap_script = ''
-    if platform.system() != 'Linux' and run_cmd_with_result(['whoami']) != 'root':
+    if platform.system() == 'Linux' and run_cmd_with_result(['whoami']) != 'root':
         uid = run_cmd_with_result(['id', '-u'])
         gid = run_cmd_with_result(['id', '-g'])
         bootstrap_script = os.path.join(gettempdir(), 'bootstrap')
