@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
 #
-import os, sys, subprocess, time
+import os, sys, subprocess, platform
 from urllib.request import urlretrieve
 from tempfile import gettempdir
 
-docker_image = 'docker.io/rocwind/dev-env'
-shell = '/bin/bash'
+
+# Download url of this script for upgrading to latest version
 download_url = 'https://raw.githubusercontent.com/rocwind/dev-env/master/docker-run'
+# The default docker image to use
+docker_image = 'docker.io/rocwind/dev-env'
+# The default user inside the image/container
+container_user = 'dev'
+# The default shell inside the image/container
+shell = '/bin/bash'
+# home, map host ~ => to container /home/$USER
+host_user_home = os.path.expanduser('~')
+container_user_home = '/home/{}'.format(container_user)
+# npm
+npm_cache_volume = 'npmcache'
+# go
+gopath_volume = 'gopath'
+# rust - TODO
+
 
 def show_help():
     print("""Launch dev environment Docker container and execute given command line inside the container.
@@ -22,69 +37,69 @@ docker-run [options] [command line]
 
 If [command line] was specified, execute the [command line] inside container and exit;
 Otherwise launch the container with interative shell.""".format(docker_image, shell))
-    return 0
+    return -1
 
-
-# map host ~ => to container /home/$USER
-host_user = os.environ.get('USER', 'user')
-container_user_home = '/home/{}'.format(host_user)
-host_user_home = os.path.expanduser('~')
-
+def run_cmd_with_result(cmd):
+    result = ''
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
+    except:
+        pass
+    return result
 
 def is_host_path_inside_user_home(path):
     return os.path.normpath(os.path.expanduser(path)).startswith(host_user_home)
 
-
 def map_host_path_to_container_path(path):
     return os.path.join(container_user_home, os.path.relpath(os.path.normpath(os.path.expanduser(path)), host_user_home))
 
+# -w xxx -v xxx:yyy --env xxx=yyy
+def get_env_and_volume_mapping_flags():
+    container_npm_cache = '/home/{}/.npm'.format(container_user)
+    container_gopath = '/home/{}/go'.format(container_user)
+    # env
+    env_list = [
+        ['npm_config_cache', container_npm_cache],
+        ['GOPATH', container_gopath],
+    ]
+    env_flags = ' '.join(map(lambda pair: '--env {}={}'.format(pair[0], pair[1]), env_list))
+    # volume mapping
+    volume_mapping = [
+        [host_user_home, container_user_home],
+    ]
+    # npm cache
+    host_npm_cache = run_cmd_with_result(['npm', 'config', 'get', 'cache'])
+    if host_npm_cache:
+        volume_mapping.append([host_npm_cache, container_npm_cache])
+    else:
+        run_cmd_with_result(['docker', 'volume', 'create', npm_cache_volume])
+        volume_mapping.append([npm_cache_volume, container_npm_cache])
+    # go path
+    host_gopath = ''
+    go_env_outputs = run_cmd_with_result(['go', 'env'])
+    if go_env_outputs:
+        for item in go_env_outputs.split('\n'):
+            (env, value) = item.split('=')
+            if (env != 'GOPATH'):
+                continue
+            host_gopath = value.strip('"')
+            break
+    if host_gopath:
+        volume_mapping.append([host_gopath, container_gopath])
+    else:
+        run_cmd_with_result(['docker', 'volume', 'create', gopath_volume])
+        volume_mapping.append([gopath_volume, container_gopath])
+    volume_mapping_flags = ' '.join(map(lambda pair: '-v {}:{}'.format(pair[0], pair[1]), volume_mapping))
 
-# read host go env
-go_env = {}
-try:
-    go_env_outputs = subprocess.run(['go', 'env'], stdout=subprocess.PIPE).stdout.decode('utf-8')
-    for item in go_env_outputs.split('\n'):
-        (env, value) = item.split('=')
-        value = value.strip('"')
-        if value:
-            go_env[env] = value
-except:
-    pass
-
-# npm cache - map into container
-host_npm_cache = os.path.expanduser('~/.npm')
-try:
-    npm_config_outputs = subprocess.run(['npm', 'config', 'get', 'cache'], stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
-    if npm_config_outputs:
-        host_npm_cache = npm_config_outputs
-except:
-    pass
-
-# define host env that need map to container
-map_env_vars = [
-    # golang
-    'GOPATH', 'GOMODCACHE', 'GOCACHE', 'GOTMPDIR',
-]
-
-env_var_defaults = {
-}
-
-
-def map_host_environment_variables():
-    env_mappings = []
-    for env in map_env_vars:
-        # go_env -> os_env -> env_defaults
-        value = go_env.get(env, os.environ.get(env, env_var_defaults.get(env, '')))
-        if not value:
-            continue
-        if is_host_path_inside_user_home(value):
-            value = map_host_path_to_container_path(value)
-        elif os.path.exists(value):  # ignore paths that doesn't support mapping
-            continue
-        env_mappings.append((env, value))
-
-    return ' '.join(map(lambda pair: '--env {}={}'.format(pair[0], pair[1]), env_mappings))
-
+    # set current dir for container
+    # TODO: handle the case that the current dir is not inside user home?
+    host_current_dir = os.getcwd()
+    container_current_dir = map_host_path_to_container_path(host_current_dir)
+    return '-w {} {} {}'.format(
+        container_current_dir,
+        volume_mapping_flags,
+        env_flags,
+    )
 
 # update this script self
 def self_upgrade():
@@ -105,12 +120,6 @@ def self_upgrade():
     print('upgrade success, will be available in next run.')
     return 0
 
-# auto check update every 1 day
-def need_auto_check_update():
-    this_script_path = os.path.realpath(__file__)
-    last_check_time = os.path.getmtime(this_script_path)
-    current_time = time.time()
-    return current_time - last_check_time > 86400
 
 if __name__ == '__main__':
     # simple arg parse
@@ -152,60 +161,74 @@ if __name__ == '__main__':
         command.append(arg)
         command_begin = True
 
-    # upgrade this tool together with docker image
-    if need_auto_check_update():
-        self_upgrade()
-        pull = False
-
     # pull docker image if needed
     if pull:
         os.system('docker pull {}'.format(docker_image))
 
-    # set current dir for container
-    host_current_dir = os.getcwd()
-    container_current_dir = map_host_path_to_container_path(host_current_dir)
-
     # map env vars
-    env_mappings = map_host_environment_variables()
+    env_and_volume_mapping_flags = get_env_and_volume_mapping_flags()
 
     # check if input is tty
     tty_flag = ''
-    bash_flag = ''
+    shell_flag = ''
     if sys.stdin.isatty():
         tty_flag = '-t'
-        bash_flag = '-i'
+        #shell_flag = '-i'
 
     # common flags with path mount and env mappings
-    flags = '--rm -i {} -w {} -v {}:{} -v {}:/root/.npm {} {}'.format(
+    flags = '--rm -u root -i {} {}'.format(
         tty_flag,
-        container_current_dir,
-        host_user_home,
-        container_user_home,
-        host_npm_cache,
-        env_mappings,
-        docker_image,
+        env_and_volume_mapping_flags,
     )
 
     # run script
-    whole_cmd = ''
+    container_cmd = ''
     if len(command) > 0:
         # run in one-time command mode
-        # map paths if necessary
+        # map paths if needed
         command = map(lambda p: map_host_path_to_container_path(p) if not no_args_path_mapping and is_host_path_inside_user_home(p) else p, command)
-        scripts = ' '.join(command)
-        whole_cmd = "docker run {} {} {} -c '{}'".format(
-            flags,
+        commandline = ' '.join(command)
+        container_cmd = "{} {} -c '{}'".format(
             shell,
-            bash_flag,
-            scripts.replace("'", "'\"'\"'"),
+            shell_flag,
+            commandline.replace("'", "'\"'\"'"),
         )
     else:
-        # run in interactive mode
-        whole_cmd = 'docker run {} {}'.format(
-            flags,
-            shell,
-        )
+        # run in interactive mode, launch the shell
+        container_cmd = shell
+
+    # handle the permission issue when working in linux as non-root user
+    # add a temp bootstrap file which
+    # - modifies the user and group id
+    # - launch shell as the container_user
+    bootstrap_script = ''
+    if platform.system() != 'Linux' and run_cmd_with_result(['whoami']) != 'root':
+        uid = run_cmd_with_result(['id', '-u'])
+        gid = run_cmd_with_result(['id', '-g'])
+        bootstrap_script = os.path.join(gettempdir(), 'bootstrap')
+        with open(bootstrap_script, mode='w', encoding='utf-8') as fp:
+            fp.write('#!{}\n'.format(shell))
+            fp.write('set -m\n')
+            fp.write('groupmod -g {} {}\n'.format(gid, container_user))
+            fp.write('usermod -u {} {}\n'.format(gid, container_user))
+            fp.write('su {} -c "cd `pwd` && {}"'.format(container_user, container_cmd))
+        run_cmd_with_result(['chmod', '+x', bootstrap_script])
+        container_bootstrap = '/opt/bootstrap'
+
+        flags = '{} -v {}:{}'.format(flags, bootstrap_script, container_bootstrap)
+        container_cmd = container_bootstrap
+
+    whole_cmd = 'docker run {} {} {}'.format(
+        flags,
+        docker_image,
+        container_cmd,
+    )
+
     # execute the cmd
-    print(whole_cmd)
+    #print(whole_cmd)
     result = subprocess.run(whole_cmd, shell=True)
+
+    if bootstrap_script:
+        os.remove(bootstrap_script)
+
     exit(result.returncode)
