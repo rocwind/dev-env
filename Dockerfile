@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean
 
 # add dev user
-RUN useradd -u 1002 -m dev \
+RUN useradd -m dev \
     && echo "dev ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
 # golang
