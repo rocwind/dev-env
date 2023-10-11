@@ -4,7 +4,8 @@ import os, sys, subprocess, platform
 from urllib.request import urlretrieve
 from tempfile import gettempdir
 
-
+# Whether show debugging log or not
+verbose = False
 # Download url of this script for upgrading to latest version
 download_url = 'https://raw.githubusercontent.com/rocwind/dev-env/master/docker-run'
 # The default docker image to use
@@ -22,17 +23,21 @@ npm_cache_volume = 'npmcache'
 gopath_volume = 'gopath'
 # rust - TODO
 
+def log(msg):
+    if verbose:
+        print('[docker-run] ' + msg)
 
 def show_help():
     print("""Launch dev environment Docker container and execute given command line inside the container.
 
 docker-run [options] [command line]
   --image: Docker image to use, default image is '{}'
-  --pull: Always pull latest image before execute any Docker command
   --shell: Shell used for executing command line inside container, default to '{}'
+  --pull: Always pull latest image before executing any Docker command
   --no-args-path-mapping: Skip auto map command line args path into path inside container.
                           By default paths that under host user $HOME will be mapped automatically.
   --upgrade: Upgrade image and this script self
+  --verbose: Show logs for debugging
   --help: Show this help information
 
 If [command line] was specified, execute the [command line] inside container and exit;
@@ -71,8 +76,10 @@ def get_env_and_volume_mapping_flags():
     # npm cache
     host_npm_cache = run_cmd_with_result(['npm', 'config', 'get', 'cache'])
     if host_npm_cache:
+        log('Use host npm cache: {}'.format(host_npm_cache))
         volume_mapping.append([host_npm_cache, container_npm_cache])
     else:
+        log('Use volume for npm cache: {}'.format(npm_cache_volume))
         run_cmd_with_result(['docker', 'volume', 'create', npm_cache_volume])
         volume_mapping.append([npm_cache_volume, container_npm_cache])
     # go path
@@ -86,8 +93,10 @@ def get_env_and_volume_mapping_flags():
             host_gopath = value.strip('"')
             break
     if host_gopath:
+        log('Use host gopath: {}'.format(host_gopath))
         volume_mapping.append([host_gopath, container_gopath])
     else:
+        log('Use volume for gopath: {}'.format(gopath_volume))
         run_cmd_with_result(['docker', 'volume', 'create', gopath_volume])
         volume_mapping.append([gopath_volume, container_gopath])
     volume_mapping_flags = ' '.join(map(lambda pair: '-v {}:{}'.format(pair[0], pair[1]), volume_mapping))
@@ -96,6 +105,9 @@ def get_env_and_volume_mapping_flags():
     # TODO: handle the case that the current dir is not inside user home?
     host_current_dir = os.getcwd()
     container_current_dir = map_host_path_to_container_path(host_current_dir)
+    log('')
+    log('Current dir: {}'.format(host_current_dir))
+    log('Map current dir to: {}'.format(container_current_dir))
     return '-w {} {} {}'.format(
         container_current_dir,
         volume_mapping_flags,
@@ -151,6 +163,9 @@ if __name__ == '__main__':
             continue
         if not command_begin and arg == "--no-args-path-mapping":
             no_args_path_mapping = True
+            continue
+        if not command_begin and arg == "--verbose":
+            verbose = True
             continue
         if not command_begin and arg == "--help":
             exit(show_help())
@@ -226,7 +241,9 @@ if __name__ == '__main__':
     )
 
     # execute the cmd
-    #print(whole_cmd)
+    log('')
+    log('Run Docker command:')
+    log(whole_cmd)
     result = subprocess.run(whole_cmd, shell=True)
 
     if bootstrap_script:
