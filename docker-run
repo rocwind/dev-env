@@ -50,8 +50,9 @@ def run_cmd_with_result(cmd):
 def is_host_path_inside_user_home(path):
     return os.path.normpath(os.path.expanduser(path)).startswith(host_user_home)
 
+# supports only path that related to user home
 def map_host_path_to_container_path(path):
-    return os.path.join(container_user_home, os.path.relpath(os.path.normpath(os.path.expanduser(path)), host_user_home))
+    return os.path.join(container_user_home, os.path.relpath(os.path.normpath(os.path.expanduser(path)), host_user_home)).replace(os.sep, '/')
 
 # -w xxx -v xxx:yyy --env xxx=yyy
 def get_env_and_volume_mapping_flags():
